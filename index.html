@@ -1,0 +1,468 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Truck, Fuel, CircleDollarSign, ArrowLeft, ArrowRight, Plus, Trash2, MapPin, CalendarDays, Gauge, Receipt, Wallet, Copy, Check, ChevronDown, UtensilsCrossed, Wrench, CircleDot, Droplets, LayoutGrid, X, Users, PackageCheck, FileText, Banknote, Building2, CheckCircle2 } from "lucide-react";
+
+type Frete = { id: string; origem: string; destino: string; valor: number; data: string; km: number };
+type Gasto = { id: string; categoria: string; valor: number; data: string; descricao: string; viagemId: string };
+type Equipe = { id: string; tipo: string; nome: string; diaria: number; porViagem: number; pagamento: string; data: string; status: string };
+type Coleta = { id: string; empresa: string; endereco: string; data: string; valor: number; status: string };
+
+const CATEGORIAS = ["Diesel", "Pedágio", "Manutenção", "Alimentação", "Pneu", "Óleo", "Outros"];
+const fmtMoney = (v: number) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+const fmtDate = (iso: string) => {
+  if (!iso) return "—";
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("pt-BR");
+};
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const monthLabel = (ym: string) => {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+};
+function shiftMonth(ym: string, delta: number) {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function categoryIcon(cat: string) {
+  if (cat === "Diesel") return <Fuel size={20} />;
+  if (cat === "Pedágio") return <CircleDollarSign size={20} />;
+  if (cat === "Manutenção") return <Wrench size={20} />;
+  if (cat === "Alimentação") return <UtensilsCrossed size={20} />;
+  if (cat === "Pneu") return <CircleDot size={20} />;
+  if (cat === "Óleo") return <Droplets size={20} />;
+  return <Receipt size={20} />;
+}
+
+async function callApi(action: string, args: Record<string, unknown>) {
+  const res = await fetch("actions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, args }) });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.error) throw new Error(json?.error?.message || json?.error || `Falha na operação (${res.status})`);
+  return json.data;
+}
+
+export default function App() {
+  const [month, setMonth] = useState(() => todayISO().slice(0, 7));
+  const [aba, setAba] = useState<"geral" | "equipe" | "coletas" | "relatorio">("geral");
+  const [fretes, setFretes] = useState<Frete[]>([]);
+  const [gastos, setGastos] = useState<Gasto[]>([]);
+  const [equipe, setEquipe] = useState<Equipe[]>([]);
+  const [coletas, setColetas] = useState<Coleta[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [form, setForm] = useState<"frete" | "gasto" | null>(null);
+  const [showEquipeForm, setShowEquipeForm] = useState(false);
+  const [showColetaForm, setShowColetaForm] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<{ kind: "frete" | "gasto" | "equipe" | "coleta"; id: string; label: string } | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportText, setExportText] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [showQuero, setShowQuero] = useState(false);
+  const exportRef = useRef<HTMLTextAreaElement>(null);
+
+  const [fOrigem, setFOrigem] = useState("");
+  const [fDestino, setFDestino] = useState("");
+  const [fValor, setFValor] = useState("");
+  const [fData, setFData] = useState(todayISO());
+  const [fKm, setFKm] = useState("");
+  const [gCategoria, setGCategoria] = useState("Diesel");
+  const [gValor, setGValor] = useState("");
+  const [gData, setGData] = useState(todayISO());
+  const [gDescricao, setGDescricao] = useState("");
+  const [gViagem, setGViagem] = useState("");
+
+  const [eTipo, setETipo] = useState("Motorista");
+  const [eNome, setENome] = useState("");
+  const [eDiaria, setEDiaria] = useState("");
+  const [eViagem, setEViagem] = useState("");
+  const [ePagamento, setEPagamento] = useState("Pix");
+  const [eData, setEData] = useState(todayISO());
+  const [eStatus, setEStatus] = useState("Pendente");
+
+  const [cEmpresa, setCEmpresa] = useState("");
+  const [cEndereco, setCEndereco] = useState("");
+  const [cData, setCData] = useState(todayISO());
+  const [cValor, setCValor] = useState("");
+  const [cStatus, setCStatus] = useState("Pendente");
+
+  const reloadRecords = async () => {
+    const [f, g, e, c] = await Promise.all([
+      callApi("records.list", { collection: "fretes" }),
+      callApi("records.list", { collection: "gastos" }),
+      callApi("records.list", { collection: "equipe" }),
+      callApi("records.list", { collection: "coletas" }),
+    ]);
+    setFretes((f?.records || []).map((r: any) => ({ id: r.id, ...r.value })));
+    setGastos((g?.records || []).map((r: any) => ({ id: r.id, ...r.value })));
+    setEquipe((e?.records || []).map((r: any) => ({ id: r.id, ...r.value })));
+    setColetas((c?.records || []).map((r: any) => ({ id: r.id, ...r.value })));
+  };
+
+  useEffect(() => {
+    (async () => {
+      try { await reloadRecords(); setLoadError(null); }
+      catch { setLoadError("Não foi possível carregar os registros agora. Tente recarregar a página."); }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  const fretesMes = useMemo(() => fretes.filter(f => f.data?.startsWith(month)).sort((a,b)=>b.data.localeCompare(a.data)), [fretes, month]);
+  const gastosMes = useMemo(() => gastos.filter(g => g.data?.startsWith(month)).sort((a,b)=>b.data.localeCompare(a.data)), [gastos, month]);
+  const equipeMes = useMemo(() => equipe.filter(e => e.data?.startsWith(month)).sort((a,b)=>b.data.localeCompare(a.data)), [equipe, month]);
+  const coletasMes = useMemo(() => coletas.filter(c => c.data?.startsWith(month)).sort((a,b)=>b.data.localeCompare(a.data)), [coletas, month]);
+
+  const totalFretes = fretesMes.reduce((s, f) => s + (Number(f.valor) || 0), 0);
+  const totalColetas = coletasMes.reduce((s, c) => s + (Number(c.valor) || 0), 0);
+  const totalGanho = totalFretes + totalColetas;
+  const totalGastoBase = gastosMes.reduce((s, g) => s + (Number(g.valor) || 0), 0);
+  const equipeTotal = (e: Equipe) => (Number(e.diaria) || 0) + (Number(e.porViagem) || 0);
+  const totalMotorista = equipeMes.filter(e => e.tipo === "Motorista").reduce((s, e) => s + equipeTotal(e), 0);
+  const totalAjudante = equipeMes.filter(e => e.tipo === "Ajudante").reduce((s, e) => s + equipeTotal(e), 0);
+  const totalEquipe = totalMotorista + totalAjudante;
+  const totalGasto = totalGastoBase + totalEquipe;
+  const lucro = totalGanho - totalGasto;
+  const maxBar = Math.max(totalGanho, totalGasto, 1);
+  const somaCategoria = (cat: string) => gastosMes.filter(g => g.categoria === cat).reduce((s, g) => s + g.valor, 0);
+  const gastosPorCategoria = useMemo(() => {
+    const map = new Map<string, number>();
+    gastosMes.forEach(g => map.set(g.categoria, (map.get(g.categoria) || 0) + g.valor));
+    return [...map.entries()].sort((a,b)=>b[1]-a[1]);
+  }, [gastosMes]);
+  const equipePendente = equipeMes.filter(e => e.status === "Pendente").length;
+  const equipePago = equipeMes.filter(e => e.status === "Pago").length;
+  const coletasPendentes = coletasMes.filter(c => c.status === "Pendente").length;
+
+  function resetFrete() { setFOrigem(""); setFDestino(""); setFValor(""); setFData(todayISO()); setFKm(""); }
+  function resetGasto() { setGCategoria("Diesel"); setGValor(""); setGData(todayISO()); setGDescricao(""); setGViagem(""); }
+  function resetEquipe() { setETipo("Motorista"); setENome(""); setEDiaria(""); setEViagem(""); setEPagamento("Pix"); setEData(todayISO()); setEStatus("Pendente"); }
+  function resetColeta() { setCEmpresa(""); setCEndereco(""); setCData(todayISO()); setCValor(""); setCStatus("Pendente"); }
+
+  async function saveFrete(e: React.FormEvent) {
+    e.preventDefault();
+    const valor = Number(String(fValor).replace(",", "."));
+    if (!fOrigem.trim() || !fDestino.trim() || !valor || valor <= 0 || !fData) { setNotice("Preencha origem, destino, valor e data do frete."); return; }
+    setSaving(true); setNotice(null);
+    try {
+      await callApi("records.create", { collection: "fretes", idempotency_key: crypto.randomUUID(), value: { origem: fOrigem.trim(), destino: fDestino.trim(), valor, data: fData, km: Number(fKm) || 0 } });
+      await reloadRecords(); resetFrete(); setForm(null); setNotice("Frete salvo.");
+    } catch (err) { setNotice(err instanceof Error ? err.message : "Não foi possível salvar o frete."); }
+    finally { setSaving(false); }
+  }
+  async function saveGasto(e: React.FormEvent) {
+    e.preventDefault();
+    const valor = Number(String(gValor).replace(",", "."));
+    if (!valor || valor <= 0 || !gData) { setNotice("Informe o valor e a data do gasto."); return; }
+    setSaving(true); setNotice(null);
+    try {
+      await callApi("records.create", { collection: "gastos", idempotency_key: crypto.randomUUID(), value: { categoria: gCategoria, valor, data: gData, descricao: gDescricao.trim(), viagemId: gViagem || "" } });
+      await reloadRecords(); resetGasto(); setForm(null); setNotice("Gasto salvo.");
+    } catch (err) { setNotice(err instanceof Error ? err.message : "Não foi possível salvar o gasto."); }
+    finally { setSaving(false); }
+  }
+  async function saveEquipe(e: React.FormEvent) {
+    e.preventDefault();
+    const diaria = Number(String(eDiaria).replace(",", "."));
+    const porViagem = Number(String(eViagem).replace(",", "."));
+    if (!eNome.trim() || (!diaria && !porViagem) || !eData) { setNotice("Informe o nome, pelo menos um valor (diária ou por viagem) e a data."); return; }
+    setSaving(true); setNotice(null);
+    try {
+      await callApi("records.create", { collection: "equipe", idempotency_key: crypto.randomUUID(), value: { tipo: eTipo, nome: eNome.trim(), diaria: diaria || 0, porViagem: porViagem || 0, pagamento: ePagamento, data: eData, status: eStatus } });
+      await reloadRecords(); resetEquipe(); setShowEquipeForm(false); setNotice("Pagamento da equipe salvo.");
+    } catch (err) { setNotice(err instanceof Error ? err.message : "Não foi possível salvar o pagamento."); }
+    finally { setSaving(false); }
+  }
+  async function saveColeta(e: React.FormEvent) {
+    e.preventDefault();
+    const valor = Number(String(cValor).replace(",", "."));
+    if (!cEmpresa.trim() || !cEndereco.trim() || !valor || valor <= 0 || !cData) { setNotice("Preencha empresa, endereço, valor e data da coleta."); return; }
+    setSaving(true); setNotice(null);
+    try {
+      await callApi("records.create", { collection: "coletas", idempotency_key: crypto.randomUUID(), value: { empresa: cEmpresa.trim(), endereco: cEndereco.trim(), data: cData, valor, status: cStatus } });
+      await reloadRecords(); resetColeta(); setShowColetaForm(false); setNotice("Coleta adicionada.");
+    } catch (err) { setNotice(err instanceof Error ? err.message : "Não foi possível salvar a coleta."); }
+    finally { setSaving(false); }
+  }
+  async function confirmarPagamento(item: Equipe) {
+    setSaving(true); setNotice(null);
+    try {
+      await callApi("records.replace", { collection: "equipe", id: item.id, value: { tipo: item.tipo, nome: item.nome, diaria: item.diaria, porViagem: item.porViagem, pagamento: item.pagamento, data: item.data, status: "Pago" } });
+      await reloadRecords(); setNotice(`Pagamento de ${item.nome} confirmado.`);
+    } catch (err) { setNotice(err instanceof Error ? err.message : "Não foi possível confirmar o pagamento."); }
+    finally { setSaving(false); }
+  }
+  async function marcarColeta(item: Coleta) {
+    setSaving(true); setNotice(null);
+    try {
+      await callApi("records.replace", { collection: "coletas", id: item.id, value: { empresa: item.empresa, endereco: item.endereco, data: item.data, valor: item.valor, status: "Coletado" } });
+      await reloadRecords(); setNotice("Coleta marcada como coletada.");
+    } catch (err) { setNotice(err instanceof Error ? err.message : "Não foi possível atualizar a coleta."); }
+    finally { setSaving(false); }
+  }
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setSaving(true);
+    try {
+      const col = pendingDelete.kind === "frete" ? "fretes" : pendingDelete.kind === "gasto" ? "gastos" : pendingDelete.kind === "equipe" ? "equipe" : "coletas";
+      await callApi("records.delete", { collection: col, id: pendingDelete.id }); await reloadRecords(); setNotice("Registro excluído.");
+    }
+    catch (err) { setNotice(err instanceof Error ? err.message : "Não foi possível excluir."); }
+    finally { setSaving(false); setPendingDelete(null); }
+  }
+
+  function gerarRelatorio() {
+    const linhasFretes = fretesMes.map(f => `• ${fmtDate(f.data)} — ${f.origem} → ${f.destino}: ${fmtMoney(f.valor)}`).join("\n") || "• Nenhum frete no mês.";
+    const linhasColetas = coletasMes.map(c => `• ${fmtDate(c.data)} — ${c.empresa} (${c.status}): ${fmtMoney(c.valor)}`).join("\n") || "• Nenhuma coleta no mês.";
+    const linhasEquipe = equipeMes.map(p => `• ${fmtDate(p.data)} — ${p.tipo} ${p.nome} • ${p.pagamento} • ${p.status}: ${fmtMoney(equipeTotal(p))}`).join("\n") || "• Nenhum pagamento da equipe no mês.";
+    const texto = `RELATÓRIO DO MÊS — ${monthLabel(month).toUpperCase()}\nAdriano da Cruz • Louveira/SP\n\nTOTAL DE FRETES: ${fretesMes.length} • ${fmtMoney(totalFretes)}\nTOTAL DE COLETAS: ${coletasMes.length} • ${fmtMoney(totalColetas)}\nTOTAL GANHO: ${fmtMoney(totalGanho)}\n\nTOTAL GASTO: ${fmtMoney(totalGasto)}\n• Diesel: ${fmtMoney(somaCategoria("Diesel"))}\n• Pedágio: ${fmtMoney(somaCategoria("Pedágio"))}\n• Manutenção: ${fmtMoney(somaCategoria("Manutenção"))}\n• Motorista: ${fmtMoney(totalMotorista)}\n• Ajudante: ${fmtMoney(totalAjudante)}\n\nLUCRO FINAL: ${fmtMoney(lucro)}\n\nFRETES:\n${linhasFretes}\n\nCOLETAS:\n${linhasColetas}\n\nEQUIPE:\n${linhasEquipe}\n\nAdriano da Cruz • WhatsApp (19) 99893-2588`;
+    setExportText(texto); setExportOpen(true); setCopied(false);
+    setTimeout(() => exportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  }
+  function copyExport() {
+    if (!exportRef.current) return;
+    exportRef.current.select();
+    const ok = document.execCommand("copy");
+    setCopied(ok);
+    if (ok) setNotice("Relatório copiado. Agora é só colar no WhatsApp.");
+  }
+
+  const inputCls = "w-full min-h-[54px] rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-4 py-3 text-[16px] outline-none focus:border-[var(--accent)]";
+  const labelCls = "block text-[13px] font-bold uppercase tracking-wide text-[var(--muted)] mb-2";
+  const tabCls = (active: boolean) => `min-h-[52px] flex-1 min-w-0 rounded-xl px-1 py-2 text-[12px] sm:text-[13px] font-extrabold flex flex-col items-center justify-center gap-1 ${active ? "bg-[var(--primary)] text-white" : "bg-[var(--surface)] border border-[var(--line)] text-[var(--ink)]"}`;
+
+  const relatorioBloco = (
+    <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 shadow-sm">
+      <div className="flex items-center gap-2"><FileText className="text-[var(--accent)]" /><h2 className="font-extrabold text-[17px]">Relatório do Mês</h2></div>
+      <p className="mt-1 text-[13px] text-[var(--muted)] capitalize">{monthLabel(month)} • Adriano da Cruz</p>
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <div className="rounded-2xl bg-[var(--surface)] p-3"><p className="text-[11px] font-bold text-[var(--muted)]">TOTAL DE FRETES</p><p className="num text-[22px] font-bold leading-tight">{fretesMes.length} frete(s)</p><p className="font-bold text-[var(--gain)]">{fmtMoney(totalFretes)}</p></div>
+        <div className="rounded-2xl bg-[var(--surface)] p-3"><p className="text-[11px] font-bold text-[var(--muted)]">TOTAL DE COLETAS</p><p className="num text-[22px] font-bold leading-tight">{coletasMes.length} coleta(s)</p><p className="font-bold text-[var(--gain)]">{fmtMoney(totalColetas)}</p></div>
+        <div className="rounded-2xl bg-[var(--gain-soft)] p-3 col-span-2 text-center"><p className="text-[11px] font-bold tracking-widest">TOTAL GANHO</p><p className="num text-[32px] font-bold leading-none">{fmtMoney(totalGanho)}</p></div>
+      </div>
+      <p className="mt-4 text-[12px] font-bold text-[var(--muted)]">TOTAL GASTO • {fmtMoney(totalGasto)}</p>
+      <div className="mt-2 space-y-2">
+        {[["Diesel", somaCategoria("Diesel")], ["Pedágio", somaCategoria("Pedágio")], ["Manutenção", somaCategoria("Manutenção")], ["Motorista", totalMotorista], ["Ajudante", totalAjudante]].map(([nome, valor]) => (
+          <div key={String(nome)}><div className="flex justify-between text-[13px] font-bold"><span>{nome}</span><span>{fmtMoney(Number(valor))}</span></div><div className="h-[14px] mt-1 rounded-full bg-[var(--surface)] overflow-hidden"><div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${totalGasto ? Math.max(Number(valor) / totalGasto * 100, Number(valor) ? 3 : 0) : 0}%` }} /></div></div>
+        ))}
+      </div>
+      <div className={`mt-4 rounded-2xl p-4 text-center text-white ${lucro >= 0 ? "bg-[var(--gain)]" : "bg-[var(--loss)]"}`}><p className="text-[12px] font-bold tracking-widest">LUCRO FINAL</p><p className="num text-[38px] leading-none font-bold">{fmtMoney(lucro)}</p><p className="text-[13px] mt-1 opacity-90">{lucro >= 0 ? "Mês no verde. Boa estrada!" : "Atenção: gastos acima do ganho."}</p></div>
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <button onClick={gerarRelatorio} className="min-h-[56px] rounded-xl bg-[var(--accent)] text-white font-extrabold text-[15px] flex items-center justify-center gap-2"><CheckCircle2 size={19} /> Compartilhar no WhatsApp</button>
+        <button onClick={() => { if (!exportOpen) gerarRelatorio(); else copyExport(); }} className="min-h-[56px] rounded-xl bg-[var(--primary)] text-white font-extrabold text-[15px] flex items-center justify-center gap-2"><Copy size={19} /> Copiar Relatório</button>
+      </div>
+      <p className="mt-2 text-center text-[12px] text-[var(--muted)]">O botão gera o texto pronto. Depois copie e cole na sua conversa do WhatsApp.</p>
+      {exportOpen && <div className="mt-3"><label className="block text-[12px] font-bold mb-2" htmlFor="resumo">TEXTO PRONTO — SELECIONE E COPIE</label><textarea ref={exportRef} id="resumo" readOnly value={exportText} rows={14} className="w-full rounded-xl border border-[var(--line)] bg-white p-3 text-[14px] leading-relaxed text-[#101c2e]" /><button onClick={copyExport} className="mt-2 w-full min-h-[52px] rounded-xl bg-[var(--primary)] text-white font-extrabold flex items-center justify-center gap-2">{copied ? <><Check /> Copiado!</> : <><Copy /> Copiar texto</>}</button></div>}
+    </section>
+  );
+
+  return (
+    <div data-safe-area-inset-root style={{ boxSizing: "border-box", paddingTop: "var(--safe-area-inset-top)" }} className="min-h-screen bg-[var(--surface)] text-[var(--ink)] overflow-x-clip">
+      <div className="mx-auto w-full max-w-[420px] pb-8">
+        <header data-safe-area-sticky-top style={{ top: "var(--safe-area-inset-top)" }} className="sticky z-20 bg-[var(--primary-2)] text-white shadow-lg">
+          <div className="px-4 pt-4 pb-3 flex items-center gap-3">
+            <div className="h-12 w-12 shrink-0 rounded-2xl bg-[var(--accent)] grid place-items-center"><Truck size={30} /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-bold tracking-[0.18em] text-[#ffb25e]">CONTROLE FINANCEIRO</p>
+              <h1 className="text-[21px] leading-tight font-black truncate">Adriano da Cruz</h1>
+              <p className="text-[13px] text-white/80 flex items-center gap-1"><MapPin size={13} /> Louveira/SP • Motorista de Caminhão</p>
+            </div>
+            <span className="rounded-full bg-white/15 px-2 py-1 text-[11px] font-bold whitespace-nowrap">ESTRADA</span>
+          </div>
+          <div className="h-[7px] road-line opacity-90" />
+        </header>
+
+        <main className="px-3 pt-4 space-y-4">
+          {loadError && <div className="rounded-2xl border border-red-300 bg-[var(--loss-soft)] px-4 py-3 text-sm font-semibold">{loadError}</div>}
+          {notice && <div className="rounded-2xl bg-[var(--primary)] text-white px-4 py-3 text-sm font-semibold flex justify-between gap-3"><span>{notice}</span><button aria-label="Fechar aviso" onClick={() => setNotice(null)}><X size={18} /></button></div>}
+
+          <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-3 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <button onClick={() => setMonth(shiftMonth(month, -1))} className="min-h-[48px] min-w-[48px] rounded-xl bg-[var(--surface)] border border-[var(--line)] grid place-items-center" aria-label="Mês anterior"><ArrowLeft /></button>
+              <div className="text-center min-w-0"><p className="text-[11px] font-bold tracking-widest text-[var(--muted)]">RESUMO DO MÊS</p><p className="num text-[26px] leading-none font-bold capitalize">{monthLabel(month)}</p></div>
+              <button onClick={() => setMonth(shiftMonth(month, 1))} className="min-h-[48px] min-w-[48px] rounded-xl bg-[var(--surface)] border border-[var(--line)] grid place-items-center" aria-label="Próximo mês"><ArrowRight /></button>
+            </div>
+            <label className="sr-only" htmlFor="mes">Escolher mês</label>
+            <div className="relative mt-3"><input id="mes" type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} className={inputCls} /><ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--muted)]" size={20} /></div>
+            <div className="mt-3 grid grid-cols-4 gap-2" role="tablist" aria-label="Seções do app">
+              <button role="tab" aria-selected={aba === "geral"} onClick={() => setAba("geral")} className={tabCls(aba === "geral")}><LayoutGrid size={18} />Geral</button>
+              <button role="tab" aria-selected={aba === "equipe"} onClick={() => setAba("equipe")} className={tabCls(aba === "equipe")}><Users size={18} />Pagar Equipe</button>
+              <button role="tab" aria-selected={aba === "coletas"} onClick={() => setAba("coletas")} className={tabCls(aba === "coletas")}><PackageCheck size={18} />Coletas</button>
+              <button role="tab" aria-selected={aba === "relatorio"} onClick={() => setAba("relatorio")} className={tabCls(aba === "relatorio")}><FileText size={18} />Relatório</button>
+            </div>
+          </section>
+
+          {aba === "geral" && (<>
+            <section aria-label="Resumo do mês" className="overflow-hidden rounded-[24px] bg-[var(--primary-2)] text-white shadow-lg">
+              <div className="p-4 grid grid-cols-2 gap-3">
+                <div className="rounded-2xl bg-white/10 p-3"><p className="text-[12px] font-bold text-emerald-300">TOTAL GANHO</p><p className="num text-[28px] leading-tight font-bold">{fmtMoney(totalGanho)}</p><p className="text-[12px] text-white/70">{fretesMes.length} frete(s) • {coletasMes.length} coleta(s)</p></div>
+                <div className="rounded-2xl bg-white/10 p-3"><p className="text-[12px] font-bold text-red-300">TOTAL GASTO</p><p className="num text-[28px] leading-tight font-bold">{fmtMoney(totalGasto)}</p><p className="text-[12px] text-white/70">{gastosMes.length} gasto(s) • {equipeMes.length} pag. equipe</p></div>
+              </div>
+              <div className={`mx-4 mb-4 rounded-2xl p-4 text-center ${lucro >= 0 ? "bg-[var(--gain)]" : "bg-[var(--loss)]"}`}>
+                <p className="text-[12px] font-bold tracking-widest">LUCRO DO MÊS</p><p className="num text-[42px] leading-none font-bold">{fmtMoney(lucro)}</p><p className="text-[13px] mt-1 opacity-90">{lucro >= 0 ? "Mês no verde. Boa estrada!" : "Atenção: gastos acima do ganho."}</p>
+              </div>
+            </section>
+
+            <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 shadow-sm">
+              <div className="flex items-center justify-between"><h2 className="font-extrabold text-[17px]">Ganho vs. Gasto</h2><span className="text-[12px] font-bold text-[var(--muted)]">BARRAS DO MÊS</span></div>
+              <div className="mt-4 space-y-4">
+                <div><div className="flex justify-between text-sm font-bold"><span className="text-[var(--gain)]">● Ganho</span><span>{fmtMoney(totalGanho)}</span></div><div className="h-[30px] mt-1 rounded-full bg-[var(--surface)] overflow-hidden"><div className="h-full rounded-full bg-[var(--gain)] transition-all" style={{ width: `${Math.max(totalGanho / maxBar * 100, totalGanho ? 3 : 0)}%` }} /></div></div>
+                <div><div className="flex justify-between text-sm font-bold"><span className="text-[var(--loss)]">● Gasto</span><span>{fmtMoney(totalGasto)}</span></div><div className="h-[30px] mt-1 rounded-full bg-[var(--surface)] overflow-hidden"><div className="h-full rounded-full bg-[var(--loss)] transition-all" style={{ width: `${Math.max(totalGasto / maxBar * 100, totalGasto ? 3 : 0)}%` }} /></div></div>
+              </div>
+              {gastosPorCategoria.length > 0 && <div className="mt-4 border-t border-[var(--line)] pt-3"><p className="text-[12px] font-bold text-[var(--muted)]">ONDE O DINHEIRO FOI</p><div className="mt-2 flex flex-wrap gap-2">{gastosPorCategoria.map(([c, v]) => <span key={c} className="rounded-full bg-[var(--blue-soft)] px-3 py-1 text-[12px] font-bold">{c} • {fmtMoney(v)}</span>)}</div></div>}
+            </section>
+
+            <section className="grid grid-cols-2 gap-3">
+              <button onClick={() => { setForm(form === "frete" ? null : "frete"); setNotice(null); }} className="min-h-[72px] rounded-2xl bg-[var(--accent)] text-white shadow-md flex flex-col items-center justify-center gap-1 font-extrabold"><span className="flex items-center gap-1"><Plus /> NOVO FRETE</span><span className="text-[11px] font-semibold opacity-90">origem • destino • valor</span></button>
+              <button onClick={() => { setForm(form === "gasto" ? null : "gasto"); setNotice(null); }} className="min-h-[72px] rounded-2xl bg-[var(--primary)] text-white shadow-md flex flex-col items-center justify-center gap-1 font-extrabold"><span className="flex items-center gap-1"><Plus /> NOVO GASTO</span><span className="text-[11px] font-semibold opacity-90">diesel • pedágio • outros</span></button>
+            </section>
+
+            {form === "frete" && (
+              <form onSubmit={saveFrete} className="rounded-[24px] border-2 border-[var(--accent)] bg-[var(--surface-2)] p-4 space-y-3">
+                <h2 className="flex items-center gap-2 font-extrabold text-lg"><Truck className="text-[var(--accent)]" /> Novo frete</h2>
+                <div><label className={labelCls} htmlFor="origem">Origem</label><input id="origem" className={inputCls} value={fOrigem} onChange={e => setFOrigem(e.target.value)} placeholder="Ex.: Louveira/SP" autoFocus /></div>
+                <div><label className={labelCls} htmlFor="destino">Destino</label><input id="destino" className={inputCls} value={fDestino} onChange={e => setFDestino(e.target.value)} placeholder="Ex.: São Paulo/SP" /></div>
+                <div className="grid grid-cols-2 gap-3"><div><label className={labelCls} htmlFor="valor-frete">Valor do frete (R$)</label><input id="valor-frete" inputMode="decimal" className={inputCls} value={fValor} onChange={e => setFValor(e.target.value)} placeholder="0,00" /></div><div><label className={labelCls} htmlFor="km">KM</label><input id="km" inputMode="numeric" className={inputCls} value={fKm} onChange={e => setFKm(e.target.value)} placeholder="0" /></div></div>
+                <div><label className={labelCls} htmlFor="data-frete">Data</label><input id="data-frete" type="date" className={inputCls} value={fData} onChange={e => setFData(e.target.value)} /></div>
+                <button disabled={saving} className="w-full min-h-[56px] rounded-xl bg-[var(--accent)] text-white font-extrabold text-[17px] disabled:opacity-60">{saving ? "Salvando..." : "Salvar frete"}</button>
+                <button type="button" onClick={() => setForm(null)} className="w-full min-h-[44px] font-bold text-[var(--muted)]">Cancelar</button>
+              </form>
+            )}
+            {form === "gasto" && (
+              <form onSubmit={saveGasto} className="rounded-[24px] border-2 border-[var(--primary)] bg-[var(--surface-2)] p-4 space-y-3">
+                <h2 className="flex items-center gap-2 font-extrabold text-lg"><Fuel className="text-[var(--primary)]" /> Novo gasto</h2>
+                <div><label className={labelCls} id="cat-label">Tipo de gasto</label><div className="grid grid-cols-2 gap-2" role="radiogroup" aria-labelledby="cat-label">{CATEGORIAS.map(c => <button type="button" key={c} onClick={() => setGCategoria(c)} aria-pressed={gCategoria === c} className={`min-h-[50px] rounded-xl border px-2 font-bold flex items-center justify-center gap-2 ${gCategoria === c ? "bg-[var(--primary)] text-white border-[var(--primary)]" : "bg-[var(--surface)] border-[var(--line)]"}`}>{categoryIcon(c)}{c}</button>)}</div></div>
+                <div className="grid grid-cols-2 gap-3"><div><label className={labelCls} htmlFor="valor-gasto">Valor (R$)</label><input id="valor-gasto" inputMode="decimal" className={inputCls} value={gValor} onChange={e => setGValor(e.target.value)} placeholder="0,00" /></div><div><label className={labelCls} htmlFor="data-gasto">Data</label><input id="data-gasto" type="date" className={inputCls} value={gData} onChange={e => setGData(e.target.value)} /></div></div>
+                <div><label className={labelCls} htmlFor="desc">Descrição (opcional)</label><input id="desc" className={inputCls} value={gDescricao} onChange={e => setGDescricao(e.target.value)} placeholder="Ex.: Posto na rodovia" /></div>
+                <div><label className={labelCls} htmlFor="viagem">Vincular a uma viagem (opcional)</label><select id="viagem" className={inputCls} value={gViagem} onChange={e => setGViagem(e.target.value)}><option value="">Sem viagem / gasto geral</option>{fretes.map(f => <option key={f.id} value={f.id}>{fmtDate(f.data)} — {f.origem} → {f.destino}</option>)}</select></div>
+                <button disabled={saving} className="w-full min-h-[56px] rounded-xl bg-[var(--primary)] text-white font-extrabold text-[17px] disabled:opacity-60">{saving ? "Salvando..." : "Salvar gasto"}</button>
+                <button type="button" onClick={() => setForm(null)} className="w-full min-h-[44px] font-bold text-[var(--muted)]">Cancelar</button>
+              </form>
+            )}
+
+            <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 shadow-sm">
+              <div className="flex items-center gap-2"><LayoutGrid className="text-[var(--accent)]" /><h2 className="font-extrabold text-[17px]">Resumo por viagem</h2></div>
+              {loading ? <p className="mt-3 text-sm text-[var(--muted)]">Carregando viagens...</p> : fretesMes.length === 0 ? <p className="mt-3 text-sm text-[var(--muted)]">Nenhuma viagem neste mês. Cadastre um frete para ver quanto sobrou.</p> : (
+                <div className="mt-3 space-y-3">{fretesMes.map(f => {
+                  const vinculados = gastosMes.filter(g => g.viagemId === f.id);
+                  const gastoViagem = vinculados.reduce((s,g)=>s+g.valor,0);
+                  const sobrou = f.valor - gastoViagem;
+                  return <article key={f.id} className="rounded-2xl bg-[var(--surface)] p-3"><div className="flex justify-between gap-2"><p className="font-extrabold">{f.origem} → {f.destino}</p><span className="text-[12px] text-[var(--muted)] whitespace-nowrap">{fmtDate(f.data)}</span></div><p className="mt-2 grid grid-cols-3 gap-2 text-center"><span className="rounded-lg bg-[var(--gain-soft)] py-2"><span className="block text-[10px] font-bold text-[var(--gain)]">GANHOU</span><b className="num text-[15px]">{fmtMoney(f.valor)}</b></span><span className="rounded-lg bg-[var(--loss-soft)] py-2"><span className="block text-[10px] font-bold text-[var(--loss)]">GASTOU</span><b className="num text-[15px]">{fmtMoney(gastoViagem)}</b></span><span className={`rounded-lg py-2 ${sobrou >= 0 ? "bg-[var(--gain)] text-white" : "bg-[var(--loss)] text-white"}`}><span className="block text-[10px] font-bold">SOBROU</span><b className="num text-[15px]">{fmtMoney(sobrou)}</b></span></p><p className="mt-2 text-[12px] text-[var(--muted)]">{vinculados.length ? `${vinculados.length} gasto(s) vinculado(s)` : "Nenhum gasto vinculado • vincule o gasto na hora de lançar"}</p></article>;
+                })}</div>
+              )}
+              {gastosMes.some(g=>!g.viagemId) && <p className="mt-3 rounded-xl bg-[var(--blue-soft)] px-3 py-2 text-[13px] font-bold">Gastos sem viagem neste mês: {fmtMoney(gastosMes.filter(g=>!g.viagemId).reduce((s,g)=>s+g.valor,0))}</p>}
+            </section>
+
+            <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 shadow-sm">
+              <h2 className="flex items-center gap-2 font-extrabold text-[17px]"><Truck className="text-[var(--accent)]" /> Fretes do mês <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-white text-[12px]">{fretesMes.length}</span></h2>
+              {fretesMes.length === 0 ? <p className="mt-3 text-sm text-[var(--muted)]">Nenhum frete lançado neste mês.</p> : <ul className="mt-3 divide-y divide-[var(--line)]">{fretesMes.map(f => <li key={f.id} className="py-3 flex items-start gap-3"><div className="flex-1 min-w-0"><p className="font-extrabold break-words">{f.origem} → {f.destino}</p><p className="text-[13px] text-[var(--muted)] flex flex-wrap gap-x-3 gap-y-1"><span className="inline-flex items-center gap-1"><CalendarDays size={13}/>{fmtDate(f.data)}</span>{f.km ? <span className="inline-flex items-center gap-1"><Gauge size={13}/>{f.km} km</span> : null}</p></div><b className="num text-[var(--gain)] text-[17px] whitespace-nowrap">+{fmtMoney(f.valor)}</b><button onClick={() => setPendingDelete({ kind: "frete", id: f.id, label: `${f.origem} → ${f.destino}` })} aria-label={`Excluir frete ${f.origem} para ${f.destino}`} className="min-h-[44px] min-w-[44px] rounded-xl bg-[var(--loss-soft)] text-[var(--loss)] grid place-items-center shrink-0"><Trash2 size={19}/></button></li>)}</ul>}
+            </section>
+
+            <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 shadow-sm">
+              <h2 className="flex items-center gap-2 font-extrabold text-[17px]"><Wallet className="text-[var(--loss)]" /> Gastos do mês <span className="rounded-full bg-[var(--loss)] px-2 py-0.5 text-white text-[12px]">{gastosMes.length}</span></h2>
+              {gastosMes.length === 0 ? <p className="mt-3 text-sm text-[var(--muted)]">Nenhum gasto lançado neste mês.</p> : <ul className="mt-3 divide-y divide-[var(--line)]">{gastosMes.map(g => <li key={g.id} className="py-3 flex items-start gap-3"><span className="h-10 w-10 shrink-0 rounded-xl bg-[var(--surface)] grid place-items-center">{categoryIcon(g.categoria)}</span><div className="flex-1 min-w-0"><p className="font-extrabold break-words">{g.categoria}{g.descricao ? ` • ${g.descricao}` : ""}</p><p className="text-[13px] text-[var(--muted)]">{fmtDate(g.data)}{g.viagemId ? ` • Viagem vinculada` : " • Sem viagem"}</p></div><b className="num text-[var(--loss)] text-[17px] whitespace-nowrap">−{fmtMoney(g.valor)}</b><button onClick={() => setPendingDelete({ kind: "gasto", id: g.id, label: `${g.categoria} de ${fmtMoney(g.valor)}` })} aria-label={`Excluir gasto ${g.categoria}`} className="min-h-[44px] min-w-[44px] rounded-xl bg-[var(--loss-soft)] text-[var(--loss)] grid place-items-center shrink-0"><Trash2 size={19}/></button></li>)}</ul>}
+            </section>
+          </>)}
+
+          {aba === "equipe" && (
+            <>
+              <section className="rounded-[24px] bg-[var(--primary-2)] text-white p-4 shadow-lg">
+                <div className="flex items-center gap-2"><Users className="text-[#ffb25e]" /><h2 className="font-extrabold text-[18px]">Pagar Equipe</h2></div>
+                <p className="mt-1 text-sm text-white/80">Motorista e ajudante • diária + valor por viagem.</p>
+                <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-xl bg-white/10 p-2"><p className="text-[11px] font-bold text-white/70">MOTORISTA</p><p className="num font-bold">{fmtMoney(totalMotorista)}</p></div>
+                  <div className="rounded-xl bg-white/10 p-2"><p className="text-[11px] font-bold text-white/70">AJUDANTE</p><p className="num font-bold">{fmtMoney(totalAjudante)}</p></div>
+                  <div className="rounded-xl bg-[var(--accent)] p-2"><p className="text-[11px] font-bold">PENDENTE</p><p className="num font-bold">{equipePendente} • {equipePago} pago(s)</p></div>
+                </div>
+                <button onClick={() => { setShowEquipeForm(!showEquipeForm); setNotice(null); }} className="mt-3 w-full min-h-[56px] rounded-xl bg-[var(--accent)] font-extrabold text-[17px] flex items-center justify-center gap-2"><Plus /> {showEquipeForm ? "Fechar formulário" : "Novo pagamento"}</button>
+              </section>
+
+              {showEquipeForm && (
+                <form onSubmit={saveEquipe} className="rounded-[24px] border-2 border-[var(--accent)] bg-[var(--surface-2)] p-4 space-y-3">
+                  <h3 className="font-extrabold text-lg flex items-center gap-2"><Users className="text-[var(--accent)]" /> Pagamento da equipe</h3>
+                  <div><label className={labelCls} id="tipo-equipe">Quem recebe</label><div className="grid grid-cols-2 gap-2" role="radiogroup" aria-labelledby="tipo-equipe">{["Motorista", "Ajudante"].map(t => <button type="button" key={t} onClick={() => setETipo(t)} aria-pressed={eTipo === t} className={`min-h-[50px] rounded-xl border font-bold ${eTipo === t ? "bg-[var(--primary)] text-white border-[var(--primary)]" : "bg-[var(--surface)] border-[var(--line)]"}`}>{t}</button>)}</div></div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><label className={labelCls} htmlFor="nome-motorista">Nome do motorista</label><input id="nome-motorista" className={inputCls} value={eTipo === "Motorista" ? eNome : ""} onChange={e => { setETipo("Motorista"); setENome(e.target.value); }} placeholder="Nome do motorista" /></div>
+                    <div><label className={labelCls} htmlFor="nome-ajudante">Nome do ajudante</label><input id="nome-ajudante" className={inputCls} value={eTipo === "Ajudante" ? eNome : ""} onChange={e => { setETipo("Ajudante"); setENome(e.target.value); }} placeholder="Nome do ajudante" /></div>
+                  </div>
+                  <p className="-mt-1 text-[12px] text-[var(--muted)]">Preencha o campo de quem vai receber. O nome salvo é o do campo preenchido.</p>
+                  <div className="grid grid-cols-2 gap-3"><div><label className={labelCls} htmlFor="diaria">Valor diária (R$)</label><input id="diaria" inputMode="decimal" className={inputCls} value={eDiaria} onChange={e => setEDiaria(e.target.value)} placeholder="0,00" /></div><div><label className={labelCls} htmlFor="valor-viagem-equipe">Valor por viagem (R$)</label><input id="valor-viagem-equipe" inputMode="decimal" className={inputCls} value={eViagem} onChange={e => setEViagem(e.target.value)} placeholder="0,00" /></div></div>
+                  <div><label className={labelCls} id="pagamento-label">Forma de pagamento</label><div className="grid grid-cols-3 gap-2" role="radiogroup" aria-labelledby="pagamento-label">{["Pix", "Dinheiro", "Cartão"].map(p => <button type="button" key={p} onClick={() => setEPagamento(p)} aria-pressed={ePagamento === p} className={`min-h-[50px] rounded-xl border font-bold ${ePagamento === p ? "bg-[var(--accent)] text-white border-[var(--accent)]" : "bg-[var(--surface)] border-[var(--line)]"}`}>{p}</button>)}</div></div>
+                  <div className="grid grid-cols-2 gap-3"><div><label className={labelCls} htmlFor="data-equipe">Data</label><input id="data-equipe" type="date" className={inputCls} value={eData} onChange={e => setEData(e.target.value)} /></div><div><label className={labelCls} htmlFor="status-equipe">Status</label><select id="status-equipe" className={inputCls} value={eStatus} onChange={e => setEStatus(e.target.value)}><option value="Pendente">Pendente</option><option value="Pago">Pago</option></select></div></div>
+                  <div className="rounded-xl bg-[var(--blue-soft)] px-3 py-2 text-sm font-bold flex justify-between"><span>Total deste pagamento</span><span className="num">{fmtMoney((Number(String(eDiaria).replace(",", ".")) || 0) + (Number(String(eViagem).replace(",", ".")) || 0))}</span></div>
+                  <button disabled={saving} className="w-full min-h-[56px] rounded-xl bg-[var(--accent)] text-white font-extrabold text-[17px] disabled:opacity-60">{saving ? "Salvando..." : "Salvar pagamento"}</button>
+                  <button type="button" onClick={() => setShowEquipeForm(false)} className="w-full min-h-[44px] font-bold text-[var(--muted)]">Cancelar</button>
+                </form>
+              )}
+
+              <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 shadow-sm">
+                <h3 className="font-extrabold text-[17px] flex items-center gap-2"><Banknote className="text-[var(--accent)]" /> Pagamentos do mês <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-white text-[12px]">{equipeMes.length}</span></h3>
+                {loading ? <p className="mt-3 text-sm text-[var(--muted)]">Carregando equipe...</p> : equipeMes.length === 0 ? <p className="mt-3 text-sm text-[var(--muted)]">Nenhum pagamento lançado neste mês.</p> : (
+                  <ul className="mt-3 space-y-3">{equipeMes.map(p => (
+                    <li key={p.id} className="rounded-2xl bg-[var(--surface)] p-3">
+                      <div className="flex justify-between gap-2"><div className="min-w-0"><p className="font-extrabold break-words">{p.tipo} • {p.nome}</p><p className="text-[13px] text-[var(--muted)]">{fmtDate(p.data)} • {p.pagamento} • Diária {fmtMoney(p.diaria)} + Viagem {fmtMoney(p.porViagem)}</p></div><b className="num text-[17px] whitespace-nowrap">{fmtMoney(equipeTotal(p))}</b></div>
+                      <div className="mt-3 flex items-center gap-2"><span className={`rounded-full px-3 py-1 text-[12px] font-extrabold ${p.status === "Pago" ? "bg-[var(--gain-soft)] text-[var(--gain)]" : "bg-[#fff1d6] text-[#9a5b00]"}`}>{p.status}</span>{p.status !== "Pago" && <button disabled={saving} onClick={() => confirmarPagamento(p)} className="flex-1 min-h-[48px] rounded-xl bg-[var(--gain)] text-white font-extrabold text-[14px] disabled:opacity-60">Confirmar Pagamento</button>}<button onClick={() => setPendingDelete({ kind: "equipe", id: p.id, label: `${p.tipo} ${p.nome} — ${fmtMoney(equipeTotal(p))}` })} aria-label={`Excluir pagamento de ${p.nome}`} className="min-h-[48px] min-w-[48px] rounded-xl bg-[var(--loss-soft)] text-[var(--loss)] grid place-items-center"><Trash2 size={19} /></button></div>
+                    </li>
+                  ))}</ul>
+                )}
+              </section>
+            </>
+          )}
+
+          {aba === "coletas" && (
+            <>
+              <section className="rounded-[24px] bg-[var(--primary-2)] text-white p-4 shadow-lg">
+                <div className="flex items-center gap-2"><Building2 className="text-[#ffb25e]" /><h2 className="font-extrabold text-[18px]">Coletas da Mesma Empresa</h2></div>
+                <p className="mt-1 text-sm text-white/80">Coletas recorrentes da mesma empresa, no mês.</p>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-center"><div className="rounded-xl bg-white/10 p-3"><p className="text-[11px] font-bold text-white/70">TOTAL DE COLETAS</p><p className="num text-[22px] font-bold leading-none">{fmtMoney(totalColetas)}</p><p className="text-[12px] text-white/70">{coletasMes.length} coleta(s)</p></div><div className="rounded-xl bg-[var(--accent)] p-3"><p className="text-[11px] font-bold">PENDENTES</p><p className="num text-[22px] font-bold leading-none">{coletasPendentes}</p><p className="text-[12px]">aguardando coleta</p></div></div>
+                <button onClick={() => { setShowColetaForm(!showColetaForm); setNotice(null); }} className="mt-3 w-full min-h-[56px] rounded-xl bg-[var(--accent)] font-extrabold text-[17px] flex items-center justify-center gap-2"><Plus /> {showColetaForm ? "Fechar formulário" : "Adicionar Coleta"}</button>
+              </section>
+
+              {showColetaForm && (
+                <form onSubmit={saveColeta} className="rounded-[24px] border-2 border-[var(--accent)] bg-[var(--surface-2)] p-4 space-y-3">
+                  <h3 className="font-extrabold text-lg flex items-center gap-2"><PackageCheck className="text-[var(--accent)]" /> Nova coleta</h3>
+                  <div><label className={labelCls} htmlFor="empresa">Nome da empresa</label><input id="empresa" className={inputCls} value={cEmpresa} onChange={e => setCEmpresa(e.target.value)} placeholder="Ex.: Empresa da coleta" autoFocus /></div>
+                  <div><label className={labelCls} htmlFor="endereco-coleta">Endereço da coleta</label><input id="endereco-coleta" className={inputCls} value={cEndereco} onChange={e => setCEndereco(e.target.value)} placeholder="Rua, número, cidade/UF" /></div>
+                  <div className="grid grid-cols-2 gap-3"><div><label className={labelCls} htmlFor="data-coleta">Data da coleta</label><input id="data-coleta" type="date" className={inputCls} value={cData} onChange={e => setCData(e.target.value)} /></div><div><label className={labelCls} htmlFor="valor-coleta">Valor da coleta (R$)</label><input id="valor-coleta" inputMode="decimal" className={inputCls} value={cValor} onChange={e => setCValor(e.target.value)} placeholder="0,00" /></div></div>
+                  <div><label className={labelCls} id="status-coleta-label">Status</label><div className="grid grid-cols-2 gap-2" role="radiogroup" aria-labelledby="status-coleta-label">{["Pendente", "Coletado"].map(s => <button type="button" key={s} onClick={() => setCStatus(s)} aria-pressed={cStatus === s} className={`min-h-[50px] rounded-xl border font-bold ${cStatus === s ? "bg-[var(--primary)] text-white border-[var(--primary)]" : "bg-[var(--surface)] border-[var(--line)]"}`}>{s}</button>)}</div></div>
+                  <button disabled={saving} className="w-full min-h-[56px] rounded-xl bg-[var(--accent)] text-white font-extrabold text-[17px] disabled:opacity-60">{saving ? "Salvando..." : "Salvar coleta"}</button>
+                  <button type="button" onClick={() => setShowColetaForm(false)} className="w-full min-h-[44px] font-bold text-[var(--muted)]">Cancelar</button>
+                </form>
+              )}
+
+              <section className="rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 shadow-sm">
+                <h3 className="font-extrabold text-[17px]">Lista de coletas <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-white text-[12px]">{coletasMes.length}</span></h3>
+                {loading ? <p className="mt-3 text-sm text-[var(--muted)]">Carregando coletas...</p> : coletasMes.length === 0 ? <p className="mt-3 text-sm text-[var(--muted)]">Nenhuma coleta neste mês. Toque em Adicionar Coleta.</p> : (
+                  <ul className="mt-3 space-y-3">{coletasMes.map(c => (
+                    <li key={c.id} className="rounded-2xl bg-[var(--surface)] p-3">
+                      <div className="flex justify-between gap-2"><div className="min-w-0"><p className="font-extrabold break-words">{c.empresa}</p><p className="text-[13px] text-[var(--muted)] break-words">{c.endereco}</p><p className="text-[13px] text-[var(--muted)]">{fmtDate(c.data)}</p></div><b className="num text-[var(--gain)] text-[17px] whitespace-nowrap">+{fmtMoney(c.valor)}</b></div>
+                      <div className="mt-3 flex items-center gap-2"><span className={`rounded-full px-3 py-1 text-[12px] font-extrabold ${c.status === "Coletado" ? "bg-[var(--gain-soft)] text-[var(--gain)]" : "bg-[#fff1d6] text-[#9a5b00]"}`}>{c.status}</span>{c.status !== "Coletado" && <button disabled={saving} onClick={() => marcarColeta(c)} className="flex-1 min-h-[48px] rounded-xl bg-[var(--gain)] text-white font-extrabold text-[14px] disabled:opacity-60">Marcar como Coletado</button>}<button onClick={() => setPendingDelete({ kind: "coleta", id: c.id, label: `${c.empresa} — ${fmtMoney(c.valor)}` })} aria-label={`Excluir coleta ${c.empresa}`} className="min-h-[48px] min-w-[48px] rounded-xl bg-[var(--loss-soft)] text-[var(--loss)] grid place-items-center"><Trash2 size={19} /></button></div>
+                    </li>
+                  ))}</ul>
+                )}
+              </section>
+            </>
+          )}
+
+          {aba === "relatorio" && relatorioBloco}
+
+          {pendingDelete && (
+            <div className="rounded-[24px] border-2 border-[var(--loss)] bg-[var(--surface-2)] p-4" role="alert"><p className="font-extrabold">Excluir este registro?</p><p className="mt-1 text-sm text-[var(--muted)] break-words">{pendingDelete.label}</p><div className="mt-3 grid grid-cols-2 gap-2"><button onClick={confirmDelete} disabled={saving} className="min-h-[52px] rounded-xl bg-[var(--loss)] text-white font-extrabold">Excluir</button><button onClick={() => setPendingDelete(null)} className="min-h-[52px] rounded-xl bg-[var(--surface)] border border-[var(--line)] font-extrabold">Manter</button></div></div>
+          )}
+
+          <p className="text-center text-[12px] text-[var(--muted)] px-4">Seus lançamentos ficam salvos no app para você consultar quando precisar.</p>
+        </main>
+
+        <footer className="mx-3 mt-2 rounded-[24px] bg-[var(--surface-2)] border border-[var(--line)] p-4 text-center shadow-sm">
+          <p className="font-extrabold">Por Adriano da Cruz — Louveira/SP</p>
+          <p className="mt-1 text-sm text-[var(--muted)]">WhatsApp (19) 99893-2588</p>
+          <button onClick={() => setShowQuero(!showQuero)} className="mt-3 w-full min-h-[52px] rounded-xl bg-[var(--accent)] text-white font-extrabold">Quero um app igual</button>
+          {showQuero && <p className="mt-3 rounded-xl bg-[var(--blue-soft)] px-3 py-3 text-left text-sm leading-relaxed">Quer um app igual para o seu trabalho? Fale com Adriano da Cruz, em Louveira/SP, pelo WhatsApp <b>(19) 99893-2588</b> e peça o seu.</p>}
+          <p className="mt-3 text-[11px] text-[var(--muted)]">Controle Financeiro • Feito para a estrada</p>
+        </footer>
+      </div>
+    </div>
+  );
+}
